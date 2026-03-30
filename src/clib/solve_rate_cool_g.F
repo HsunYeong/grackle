@@ -279,6 +279,11 @@
       real*8 heq1, heq2, eqk221, eqk222, eqk131, eqk132,
      &       eqt1, eqt2, eqtdef, dheq, heq, dlogtem, dx_cgs,
      &       c_ljeans
+      real*8  rho_cgs, temp, tsp_gyr, tsp_code, old
+      real*8, parameter :: GYR_SEC = 3.15576e16_DKIND
+      real*8, parameter :: a_um  = 0.035_DKIND
+      real*8, parameter :: omega = 2.5_DKIND
+      real*8 :: tgas_end(in)
 
 !  row temporaries
 
@@ -380,7 +385,8 @@
 !$omp&   eqt1, eqt2, eqtdef, dheq, heq,
 !$omp&   indixe,
 !$omp&   t1, t2, logtem, tdef,
-!$omp&   dtit, ttot, p2d, tgas, tgasold,
+!$omp&   dtit, ttot, p2d, tgas, tgasold, tgas_end,
+!$omp&   rho_cgs, temp, tsp_gyr, tsp_code, old,
 !$omp&   tdust, metallicity, dust2gas, rhoH, mmw,
 !$omp&   mynh, myde, gammaha_eff, gasgr_tdust, regr, olddtit,
 !$omp&   HIp, HIIp, HeIp, HeIIp, HeIIIp,
@@ -713,14 +719,14 @@
 !              table and edot < 0, then shut off the cooling.
 
                if (tgas(i) .le. 1.01_DKIND*temstart .and.
-     &              edot(i) .lt. 0._DKIND) 
+     &              edot(i) .lt. 0._DKIND)
      &              edot(i) = tiny8
-	       if (abs(edot(i)) .lt. tiny8) edot(i) = tiny8
+          if (abs(edot(i)) .lt. tiny8) edot(i) = tiny8
 
 !              Compute timestep for 10% change
 
                   dtit(i) = min(real(abs(0.1_DKIND*
-     &              energy/edot(i)), DKIND), 
+     &              energy/edot(i)), DKIND),
      &              dt-ttot(i), dtit(i))
 
                if (dtit(i) .ne. dtit(i)) then
@@ -754,6 +760,28 @@
 #endif /* WRITE_COOLING_DEBUG */
             endif   ! itmask
             enddo   ! end loop over i
+
+!           Compute max timestep for dust sputtering
+            do i = is+1, ie+1
+            if (itmask(i) .and. idustfield .eq. 1) then
+               rho_cgs = max( d(i,j,k) * dbase1, tiny8 )
+               temp = max( tgas(i), 1.0_DKIND )
+               tsp_gyr = 0.17_DKIND * (a_um/0.1_DKIND) *
+     &                  (1.0e-27_DKIND / rho_cgs) *
+     &                  ( ((10.0_DKIND**6.3_DKIND)/temp)**
+     &                   omega + 1.0_DKIND )
+!              transform to  code time
+               tsp_code = tsp_gyr * GYR_SEC / utim
+
+!test
+               if (tsp_code .gt. 0.0_DKIND) then
+               dtit(i) = min(dtit(i),
+     &                       0.1_DKIND*tsp_code/3._DKIND,
+     &                       dt - ttot(i))
+               endif
+
+            endif
+            enddo
 
 !           Update total and gas energy
 
@@ -797,11 +825,34 @@
      &                     HIp, HIIp, HeIp, HeIIp, HeIIIp, dep,
      &                     HMp, H2Ip, H2IIp, DIp, DIIp, HDIp,
      &                     dedot_prev, HIdot_prev,
-     &                     iradtrans, irt_honly, 
+     &                     iradtrans, irt_honly,
      &                     kphHI, kphHeI, kphHeII,
      &                     itmask)
 
             endif
+
+
+      do i = is+1, ie+1
+        if (.not. itmask(i)) cycle
+        rho_cgs = max( d(i,j,k) * dbase1, tiny8 )
+        tgas_end(i) = e(i,j,k)*(gamma-1._DKIND)*mmw(i)*utem
+
+        temp    = max( (tgas(i) + 0.5_DKIND *(tgas_end(i) - tgas(i))), 1.0_DKIND )
+        tsp_gyr = 0.17_DKIND * (a_um/0.1_DKIND) *
+     &    (1.0e-27_DKIND / rho_cgs) *
+     &    ( ((10.0_DKIND**6.3_DKIND)/temp)**omega + 1.0_DKIND )
+
+        ! transform to  code time
+        tsp_code = tsp_gyr * GYR_SEC / utim
+
+        if (tsp_code .gt. 0.0_DKIND .and. idustfield .eq. 1) then
+          old  = dust(i,j,k)
+          !exponential
+          dust(i,j,k) = old * exp( - dtit(i) / (tsp_code/3.0_DKIND) )
+
+          if (dust(i,j,k) .lt. 0.0_DKIND) dust(i,j,k) = 0.0_DKIND
+        end if
+      end do
 
 !           Add the timestep to the elapsed time for each cell and find
 !            minimum elapsed time step in this row
